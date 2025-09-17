@@ -1,65 +1,81 @@
 # app.py
 import streamlit as st
-from transformers import pipeline
-import torch
 import pandas as pd
 
-st.set_page_config(page_title="Clasificador de Tópicos (Zero-Shot)", layout="centered")
-
+st.set_page_config(page_title="Clasificador Zero-Shot (Demo)", layout="centered")
 st.title("Clasificador de Tópicos Flexible (Zero-Shot)")
-st.write(
-    "Ingresa un texto y una lista de etiquetas separadas por comas. "
-    "El modelo evaluará la afinidad entre el texto y cada etiqueta usando NLI."
-)
 
-# Cachar la carga del pipeline para que sólo se descargue/instancie una vez
-@st.cache_resource
-def cargar_pipeline(model_name: str = "facebook/bart-large-mnli"):
-    # usar GPU si está disponible
-    device = 0 if torch.cuda.is_available() else -1
-    return pipeline("zero-shot-classification", model=model_name, device=device)
+st.write("Ingresa un texto y etiquetas separadas por comas. Intentaremos usar `transformers` (zero-shot). Si no está disponible, caeremos a un demo por palabras clave.")
 
-pipe = cargar_pipeline()
+# Intentar cargar transformers lazy (evitar fallo inmediato al importar en entornos sin deps)
+def cargar_pipeline_seguro():
+    try:
+        from transformers import pipeline
+        import torch
+        device = 0 if torch.cuda.is_available() else -1
+        pipe = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=device)
+        return ("hf", pipe)
+    except Exception as e:
+        # Retornar None + excepción para mostrar al usuario
+        return ("fallback", str(e))
 
-with st.form("formulario_clasificacion"):
-    texto = st.text_area("Texto (premisa) a analizar", height=160, placeholder="Escribe aquí el texto...")
-    etiquetas_raw = st.text_input("Etiquetas (separadas por comas)", placeholder="deportes, política, tecnología, salud")
+modo, recurso = cargar_pipeline_seguro()
+
+with st.form("form"):
+    texto = st.text_area("Texto a analizar", height=160, placeholder="Escribe el texto...")
+    etiquetas_raw = st.text_input("Etiquetas (separadas por comas)", placeholder="deportes, politica, tecnologia")
     submit = st.form_submit_button("Clasificar")
 
+def clasificador_fallback(texto, etiquetas):
+    # Demo simple: puntaje por coincidencias de palabras (normalizado)
+    txt = texto.lower()
+    puntajes = []
+    for e in etiquetas:
+        e_low = e.lower()
+        matches = sum(1 for tok in e_low.split() if tok in txt)
+        # puntaje básico: coincidencias / (1 + numero_palabras_etiqueta)
+        score = matches / (1 + len(e_low.split()))
+        puntajes.append(score)
+    # normalizar a [0,1]
+    mx = max(puntajes) if puntajes else 1
+    if mx > 0:
+        puntajes = [p/mx for p in puntajes]
+    return etiquetas, puntajes
+
 if submit:
-    if (not texto) or (not etiquetas_raw.strip()):
-        st.warning("Por favor ingresa tanto el texto como al menos una etiqueta.")
+    if not texto or not etiquetas_raw.strip():
+        st.warning("Por favor ingresa texto y al menos una etiqueta.")
     else:
-        # Procesar etiquetas: limpiar y eliminar vacíos
         etiquetas = [e.strip() for e in etiquetas_raw.split(",") if e.strip()]
-        if len(etiquetas) == 0:
-            st.warning("No se detectaron etiquetas válidas. Revisa la entrada.")
+        if not etiquetas:
+            st.warning("No se detectaron etiquetas válidas.")
         else:
-            with st.spinner("Evaluando..."):
-                # Llamada al pipeline (por defecto hypothesis_template puede estar bien)
-                resultado = pipe(texto, etiquetas, multi_label=True)
-                # resultado tiene 'labels' y 'scores' (si multi_label=True)
-                labels = resultado["labels"]
-                scores = resultado["scores"]
+            if modo == "hf":
+                st.info("Usando transformers (HF) para clasificación zero-shot.")
+                pipe = recurso
+                with st.spinner("Evaluando con modelo HF... (esto puede tardar)"):
+                    try:
+                        resultado = pipe(texto, etiquetas, multi_label=True)
+                        labels = resultado["labels"]
+                        scores = resultado["scores"]
+                        df = pd.DataFrame({"Etiqueta": labels, "Puntaje": scores}).sort_values("Puntaje", ascending=False).reset_index(drop=True)
+                        st.dataframe(df.style.format({"Puntaje": "{:.4f}"}), use_container_width=True)
+                        st.subheader("Gráfico de barras")
+                        st.bar_chart(df.set_index("Etiqueta"))
+                        st.markdown(f"**Etiqueta más probable:** **{df.iloc[0]['Etiqueta']}** ({df.iloc[0]['Puntaje']:.4f})")
+                        with st.expander("Salida cruda del modelo (HF)"):
+                            st.json(resultado)
+                    except Exception as e:
+                        st.error("Ocurrió un error al evaluar el modelo HF:")
+                        st.exception(e)
+            else:
+                st.warning("`transformers` o `torch` no están disponibles en este entorno. Usando demo por palabras clave.")
+                etiquetas_out, puntajes = clasificador_fallback(texto, etiquetas)
+                df = pd.DataFrame({"Etiqueta": etiquetas_out, "Puntaje": puntajes}).sort_values("Puntaje", ascending=False).reset_index(drop=True)
+                st.dataframe(df.style.format({"Puntaje": "{:.4f}"}), use_container_width=True)
+                st.subheader("Gráfico de barras")
+                st.bar_chart(df.set_index("Etiqueta"))
+                st.markdown("**Nota:** Este es un fallback para demo. Para usar el clasificador real en la nube, añade `transformers` y `torch` a `requirements.txt` y redepliega.")
 
-                # Crear DataFrame ordenado
-                df = pd.DataFrame({"Etiqueta": labels, "Puntaje": scores})
-                df_sorted = df.sort_values("Puntaje", ascending=False).reset_index(drop=True)
-
-            st.subheader("Resultados")
-            st.write("Tabla de afinidad (ordenada):")
-            st.dataframe(df_sorted.style.format({"Puntaje": "{:.4f}"}), use_container_width=True)
-
-            st.subheader("Gráfico de barras")
-            # st.bar_chart funciona con dataframe indexado por etiqueta
-            chart_df = df_sorted.set_index("Etiqueta")
-            st.bar_chart(chart_df)
-
-            st.markdown("**Etiqueta más probable:**")
-            mejor = df_sorted.iloc[0]
-            st.markdown(f"- **{mejor['Etiqueta']}** con puntaje **{mejor['Puntaje']:.4f}**")
-
-            # Mostrar salida completa del pipeline (opcional)
-            with st.expander("Ver salida cruda del modelo"):
-                st.json(resultado)
-
+                st.caption("Detalles del intento de carga de transformers:")
+                st.code(recurso)
