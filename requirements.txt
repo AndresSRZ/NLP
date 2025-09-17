@@ -1,0 +1,7 @@
+streamlit==1.30.0
+pandas
+transformers==4.35.0
+torch   # nota: ocupará espacio; si falla en Streamlit Cloud, usa alternativa basada en HF Inference API
+numpy<1.28,>=1.21.6
+scipy
+scikit-learn
